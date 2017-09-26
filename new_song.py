@@ -2,17 +2,23 @@
 """
 获取所有的歌手信息
 """
+from Crypto.Cipher import AES
 import requests
+import base64
 import urlparse
 import re
-from pythonDB import DB
 from bs4 import BeautifulSoup
 from lxml import etree
 import time,sys,Queue
 import logging
 import random
 import sys
+import codecs
+import json
 import time
+from sqlalchemy import exc
+from sqlalchemy.orm import sessionmaker
+from util.items import *
 reload(sys)
 sys.setdefaultencoding('utf8')
 logging.basicConfig(filename='logger.log',
@@ -21,6 +27,8 @@ logging.basicConfig(filename='logger.log',
                         datefmt='%a, %d %b %Y %H:%M:%S')
 Albums = []
 Songs = []
+SongsAndHotLikes = []
+
 # 头部信息
 headers = {
     'Host':"music.163.com",
@@ -33,6 +41,7 @@ headers = {
 }
 
 def get_album(url, singer_id, nextflag=0):
+    print '===start get album==='
     params = {'id': singer_id}
     if nextflag==0:
         r = requests.get(url, params=params)
@@ -51,7 +60,7 @@ def get_album(url, singer_id, nextflag=0):
 	album_date = a.xpath('./p/span[@class="s-fc3"]/text()')[0] if len(a.xpath('./p/span/text()'))>0 else None
 	album_id = a.xpath('./div/a[@class="icon-play f-alpha"]/@data-res-id')[0] if len(a.xpath('./div/a[@class="icon-play f-alpha"]/@data-res-id'))>0 else None
         album_img = a.xpath('./div/img/@src')[0] if len(a.xpath('./div/img/@src'))>0 else None
-	if album_cid and album_name and singer_name and album_date:
+	if album_id and album_name and singer_name and album_date:
 	    logging.info([album_id, album_name, singer_name, album_img, album_date])
 	    Albums.append({'album_id':album_id, 'album_name':album_name, 'album_date':album_date, 'singer_name':singer_name, 'singer_id':singer_id})
 
@@ -63,7 +72,8 @@ def get_album(url, singer_id, nextflag=0):
         get_album(url, singer_id, 1)
 
 def save_song(url, album):
-    params = {'id': album.album_id}
+    print '===start get song==='
+    params = {'id': album['album_id']}
     r = requests.get(url, params=params)
 
     # 网页解析
@@ -79,11 +89,13 @@ def save_song(url, album):
         result = re.match('.*?(\d+)',song_id)
         if result:
             song_id = result.groups(1)[0]
-        if song_id != None and song_name != None:
-            Songs.append('song_id':song_id, 'song_name':song_name, 'album_id':album.album_id, 'album_name':album.album_name, 'singer_id':album.singer_id, 'singer_name':album.singer_name, 'album_date':album.album_date)
-            logging.info(str(song_id)+'--'+song_name)
+            #if song_id != None and song_name != None:
+            Songs.append({'song_id':song_id, 'song_name':song_name, 'album_id':album['album_id'], 'album_name':album['album_name'], 'singer_id':album['singer_id'], 'singer_name':album['singer_name'], 'album_date':album['album_date']})
+            logging.info({'song_id':song_id, 'song_name':song_name, 'album_id':album['album_id'], 'album_name':album['album_name'], 'singer_id':album['singer_id'], 'singer_name':album['singer_name'], 'album_date':album['album_date']})
         else:
-            logging.info(str(album.album_id)+'-- not exist')
+            logging.error('==album=='+str(album['album_id'])+'-- not exist')
+
+
 
 second_param = "010001" # 第二个参数
 # 第三个参数
@@ -127,42 +139,93 @@ def get_json(url, params, encSecKey):
         "params": params,
             "encSecKey": encSecKey
     }
-    response = requests.post(url, headers=headers, data=data,proxies = proxies)
+    response = requests.post(url, headers=headers, data=data)
     return response.content
 
 # 抓取热门评论，返回热评列表
-def get_hot_comments(url):
-    hot_comments_list = []
+def get_hot_comments(song, session):
+    print '===start get comment==='
+    song_url1 = "http://music.163.com/weapi/v1/resource/comments/R_SO_4_"
+    song_url2 = "/?csrf_token="
     hot_comments_list.append(u"用户ID 用户昵称 用户头像地址 评论时间 点赞总数 评论内容\n")
     params = get_params(1) # 第一页
     encSecKey = get_encSecKey()
-    json_text = get_json(url,params,encSecKey)
+    json_text = get_json(song_url1+song['song_id']+song_url2,params,encSecKey)
     json_dict = json.loads(json_text)
+    song['comment_num'] = json_dict['total']
+    SongsAndHotLikes.append(song)
+
     hot_comments = json_dict['hotComments'] # 热门评论
-    print("共有%d条热门评论!" % len(hot_comments))
-    print hot_comments
+
+    logging.info("共有%d条热门评论!" % len(hot_comments))
     for item in hot_comments:
-        comment = item['content'] # 评论内容
+        hot_comment = []
+        content = item['content'] # 评论内容
         likedCount = item['likedCount'] # 点赞总数
+        commentId = item['commentId'] # 评论id
         comment_time = item['time'] # 评论时间(时间戳)
         userID = item['user']['userId'] # 评论者id
         nickname = item['user']['nickname'] # 昵称
         avatarUrl = item['user']['avatarUrl'] # 头像地址
-        comment_info = unicode(userID) + u" " + nickname + u" " + avatarUrl + u" " + unicode(comment_time) + u" " + unicode(likedCount) + u" " + comment + u"\n"
-        hot_comments_list.append(comment_info)
-        with codecs.open(u"晴天hot.txt",'a',encoding='utf-8') as f:
-                f.writelines(comment_info)
-    return hot_comments_list
+        try:
+            comment = Comment(nickname=nickname, content=content, date=comment_time, song_name=song['song_name'], song_id=song['song_id'], likes=likedCount, user_id=userID, user_img=avatarUrl, comment_id=commentId )
+    	    session.add(comment)
+    	    session.commit()
+            logging.info({'nickname':nickname, 'content':content, 'date':comment_time, 'song_name':song['song_name'], 'song_id':song['song_id'], 'likes':likedCount, 'user_id':userID, 'user_img':avatarUrl, 'comment_id':commentId})
+	except exc.IntegrityError as ex:
+            logging.error('==comment=='+str(song['song_id'])+':'+song['song_name']+'::'+content+'::'+str(ex))
+    	    session.rollback()
+
+def save_lyric(sahl, session):
+    print '===start get lyric==='
+    params = {
+	'id': sahl['song_id'],
+	'lv':1,
+	'kv':1,
+	'tv':-1
+    }
+    lrc_url = 'http://music.163.com/api/song/lyric'
+
+    lyric = requests.get(lrc_url, params=params)
+    json_obj = lyric.text
+    j = json.loads(json_obj)
+    if j['lrc']['lyric']:
+	lrc = j['lrc']['lyric']
+	pat = re.compile(r'\[.*\]')
+	lrc1 = re.sub(pat, "", lrc)
+	lrc = lrc1.strip()
+    else:
+	lrc = u"暂无歌词"
+    try:
+	song = Song(song_name=sahl['song_name'], song_id=sahl['song_id'], album_id=sahl['album_id'], album_name=sahl['album_name'], singer_id=sahl['singer_id'], singer_name=sahl['singer_name'], date=sahl['album_date'], comment_num=sahl['comment_num'], lyric=lrc)
+	session.add(song)
+	session.commit()
+	logging.info('success:get lyric=='+str(sahl['song_id']))
+    except exc.IntegrityError as ex:
+	session.rollback()
+	logging.error('==song=='+str(sahl['song_id'])+':'+sahl['song_name']+'::'+lrc+'::'+str(ex))
 
 
 if __name__ == '__main__':
+    engine = create_engine('mysql+mysqlconnector://root:123456@localhost:3306/newwyy?charset=utf8', echo=True)
+
+    # create a Session
+    Session = sessionmaker(bind=engine)
+    session = Session()
 
     singer_id = 6452
     get_album_url = 'http://music.163.com/artist/album'
     get_album(get_album_url, singer_id, 0)
-
     get_song_url = 'http://music.163.com/album'
     for album in Albums:
         save_song(get_song_url, album)
-    #sleeptime = random.randint(0, 10)
-    #time.sleep(sleeptime)
+    	sleeptime = random.randint(0, 10)
+    	time.sleep(sleeptime)
+    for song in Songs:
+        get_hot_comments(song, session)
+	sleeptime = random.randint(0, 10)
+	time.sleep(sleeptime)
+    for sahl in SongsAndHotLikes:
+	save_lyric(sahl, session)
+	sleeptime = random.randint(0, 10)
+	time.sleep(sleeptime)

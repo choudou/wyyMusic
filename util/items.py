@@ -14,14 +14,14 @@ class Song(Base):
     __tablename__ = "song"
  
     id = Column(BIGINT, primary_key=True)
-    name = Column(String(512))
-    song_id = Column(BIGINT)
+    song_name = Column(String(512))
+    song_id = Column(BIGINT,unique=True)
     album_id = Column(BIGINT)
     album_name = Column(String(512))
     singer_id = Column(BIGINT)
     singer_name = Column(String(512))
     date = Column(String(20))
-    commentNum = Column(BIGINT)
+    comment_num = Column(BIGINT)
     lyric = Column(TEXT)
 
  
@@ -35,9 +35,9 @@ class Comment(Base):
     song_name = Column(String(512))
     song_id = Column(BIGINT)
     likes = Column(BIGINT)
-    userid = Column(BIGINT)
-    userimg = Column(String(512))
-    comment_id = Column(BIGINT)
+    user_id = Column(BIGINT)
+    user_img = Column(String(512))
+    comment_id = Column(BIGINT, unique=True)
 
 
     #----------------------------------------------------------------------
